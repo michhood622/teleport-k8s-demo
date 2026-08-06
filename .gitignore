@@ -1,0 +1,7 @@
+.vagrant/
+*.log
+*.key
+*.csr
+*.crt
+nginx-user.conf
+.DS_Store
