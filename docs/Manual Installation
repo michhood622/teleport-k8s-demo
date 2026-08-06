@@ -1,218 +1,2811 @@
-Step 3 – Install containerd (All Nodes)
-sudo apt update
-sudo apt install -y containerd
+# Kubernetes Take-Home Exercise — Complete Manual Build
 
-Generate the configuration:
+## Environment
 
+| VM            | Hostname       | IP              |
+| ------------- | -------------- | --------------- |
+| Control Plane | `controlplane` | `192.168.56.10` |
+| Worker 1      | `node01`       | `192.168.56.11` |
+| Worker 2      | `node02`       | `192.168.56.12` |
+
+Operating System:
+
+```text
+Ubuntu 24.04
+```
+
+Container Runtime:
+
+```text
+containerd
+```
+
+Kubernetes Networking:
+
+```text
+Flannel
+```
+
+Application:
+
+```text
+NGINX
+```
+
+Additional components:
+
+```text
+Ingress NGINX
+cert-manager
+Kubernetes RBAC
+Kubernetes CSR authentication
+```
+
+---
+
+# 1. Create the Project
+
+On your Mac:
+
+```bash
+mkdir -p teleport-k8s-demo/manifests
+cd teleport-k8s-demo
+```
+
+The finished project will look like:
+
+```text
+teleport-k8s-demo/
+├── Vagrantfile
+├── README.md
+└── manifests/
+    ├── nginx-user-csr.yaml
+    ├── nginx-rbac.yaml
+    ├── cluster-issuer.yaml
+    ├── nginx-deployment.yaml
+    ├── nginx-service.yaml
+    ├── nginx-certificate.yaml
+    └── nginx-ingress.yaml
+```
+
+---
+
+# 2. Create the Vagrantfile
+
+On your Mac:
+
+```bash
+cat <<'EOF' > Vagrantfile
+Vagrant.configure("2") do |config|
+
+  config.vm.box = "ubuntu/noble64"
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = "4096"
+    vb.cpus = 2
+  end
+
+  config.vm.define "controlplane" do |cp|
+    cp.vm.hostname = "controlplane"
+    cp.vm.network "private_network", ip: "192.168.56.10"
+
+    cp.vm.provider "virtualbox" do |vb|
+      vb.name = "controlplane"
+    end
+  end
+
+  config.vm.define "node01" do |node|
+    node.vm.hostname = "node01"
+    node.vm.network "private_network", ip: "192.168.56.11"
+
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "node01"
+    end
+  end
+
+  config.vm.define "node02" do |node|
+    node.vm.hostname = "node02"
+    node.vm.network "private_network", ip: "192.168.56.12"
+
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "node02"
+    end
+  end
+
+end
+EOF
+```
+
+Start the machines:
+
+```bash
+vagrant up
+```
+
+Verify:
+
+```bash
+vagrant status
+```
+
+Expected:
+
+```text
+controlplane   running
+node01         running
+node02         running
+```
+
+---
+
+# 3. Configure All Three Nodes
+
+The next sections must be completed on:
+
+```text
+controlplane
+node01
+node02
+```
+
+Start with the control plane:
+
+```bash
+vagrant ssh controlplane
+```
+
+---
+
+# 4. Verify Network Interfaces
+
+Run:
+
+```bash
+ip -br address
+```
+
+On the control plane you should see something similar to:
+
+```text
+lo      UNKNOWN   127.0.0.1/8
+eth0    UP        10.0.2.15/24
+eth1    UP        192.168.56.10/24
+```
+
+The important interface is:
+
+```text
+eth1
+```
+
+with:
+
+```text
+192.168.56.10
+```
+
+The other interface:
+
+```text
+10.0.2.15
+```
+
+is Vagrant's NAT interface.
+
+This distinction is extremely important because both **kubelet and Flannel need to use the `192.168.56.x` network**.
+
+---
+
+# 5. Configure `/etc/hosts`
+
+Do this on all three machines:
+
+```bash
+sudo tee -a /etc/hosts <<EOF
+192.168.56.10 controlplane
+192.168.56.11 node01
+192.168.56.12 node02
+EOF
+```
+
+Test:
+
+```bash
+ping -c 2 controlplane
+ping -c 2 node01
+ping -c 2 node02
+```
+
+---
+
+# 6. Disable Swap
+
+On all three nodes:
+
+```bash
+sudo swapoff -a
+```
+
+Disable it permanently:
+
+```bash
+sudo sed -i '/ swap / s/^/#/' /etc/fstab
+```
+
+Verify:
+
+```bash
+swapon --show
+```
+
+There should be no output.
+
+---
+
+# 7. Configure Kernel Modules
+
+Create the Kubernetes module configuration:
+
+```bash
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+```
+
+Load them:
+
+```bash
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+Verify:
+
+```bash
+lsmod | grep overlay
+lsmod | grep br_netfilter
+```
+
+---
+
+# 8. Configure Kubernetes Networking Parameters
+
+Create:
+
+```bash
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+```
+
+Apply:
+
+```bash
+sudo sysctl --system
+```
+
+Verify:
+
+```bash
+sysctl net.ipv4.ip_forward
+```
+
+Expected:
+
+```text
+net.ipv4.ip_forward = 1
+```
+
+---
+
+# 9. Install Containerd
+
+On all three nodes:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y containerd
+```
+
+Create its configuration directory:
+
+```bash
 sudo mkdir -p /etc/containerd
+```
 
+Generate the default configuration:
+
+```bash
 containerd config default | sudo tee /etc/containerd/config.toml
+```
 
-Enable Systemd cgroups:
+---
 
+# 10. Configure Containerd Systemd Cgroups
+
+Kubernetes and containerd should use the same cgroup driver.
+
+Change:
+
+```text
+SystemdCgroup = false
+```
+
+to:
+
+```text
+SystemdCgroup = true
+```
+
+Use:
+
+```bash
 sudo sed -i \
-'s/SystemdCgroup = false/SystemdCgroup = true/' \
-/etc/containerd/config.toml
+  's/SystemdCgroup = false/SystemdCgroup = true/' \
+  /etc/containerd/config.toml
+```
 
-Restart:
+Verify:
 
+```bash
+grep SystemdCgroup /etc/containerd/config.toml
+```
+
+Expected:
+
+```text
+SystemdCgroup = true
+```
+
+Restart containerd:
+
+```bash
 sudo systemctl restart containerd
 sudo systemctl enable containerd
-Step 4 – Install Kubernetes
+```
 
-Install prerequisites:
+Verify:
 
+```bash
+sudo systemctl status containerd --no-pager
+```
+
+---
+
+# 11. Install Kubernetes
+
+On all three nodes:
+
+```bash
 sudo apt-get update
-sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+sudo apt-get install -y \
+  apt-transport-https \
+  ca-certificates \
+  curl \
+  gpg
+```
 
-Create the keyring:
+Create:
 
-sudo mkdir -p -m 755 /etc/apt/keyrings
+```bash
+sudo mkdir -p /etc/apt/keyrings
+```
 
-Import the Kubernetes signing key:
+Add the Kubernetes signing key:
 
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key \
+```bash
+curl -fsSL \
+https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key \
 | sudo gpg --dearmor \
 -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+```
 
-Create the repository:
+Add repository:
 
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' \
+```bash
+echo \
+'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' \
 | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
 
-Update:
+Install:
 
-sudo apt update
+```bash
+sudo apt-get update
 
-Install Kubernetes:
+sudo apt-get install -y \
+  kubelet \
+  kubeadm \
+  kubectl
+```
 
-sudo apt install -y \
-kubelet \
-kubeadm \
-kubectl
+Prevent unintended version upgrades:
 
-Prevent upgrades:
+```bash
+sudo apt-mark hold \
+  kubelet \
+  kubeadm \
+  kubectl
+```
 
-sudo apt-mark hold kubelet kubeadm kubectl
+Verify:
 
-Enable kubelet:
+```bash
+kubeadm version
+kubectl version --client
+kubelet --version
+```
 
-sudo systemctl enable kubelet
-Step 5 – Initialize the Cluster
+---
+
+# 12. Configure the kubelet Node IP
+
+This is one of the major fixes discovered while building the cluster.
+
+Without explicitly setting the address, kubelet may register:
+
+```text
+10.0.2.x
+```
+
+instead of:
+
+```text
+192.168.56.x
+```
+
+Create the systemd directory on every node:
+
+```bash
+sudo mkdir -p /etc/systemd/system/kubelet.service.d
+```
+
+## Control Plane
+
+On `controlplane`:
+
+```bash
+cat <<EOF | sudo tee \
+/etc/systemd/system/kubelet.service.d/20-node-ip.conf
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--node-ip=192.168.56.10"
+EOF
+```
+
+## Node01
+
+On `node01`:
+
+```bash
+cat <<EOF | sudo tee \
+/etc/systemd/system/kubelet.service.d/20-node-ip.conf
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--node-ip=192.168.56.11"
+EOF
+```
+
+## Node02
+
+On `node02`:
+
+```bash
+cat <<EOF | sudo tee \
+/etc/systemd/system/kubelet.service.d/20-node-ip.conf
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--node-ip=192.168.56.12"
+EOF
+```
+
+On every machine:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+```
+
+At this stage kubelet may repeatedly restart.
+
+That is expected because Kubernetes has not been initialized yet.
+
+---
+
+# 13. Initialize the Kubernetes Control Plane
+
+From this point forward, commands are run on:
+
+```text
+controlplane
+```
+
+unless otherwise stated.
+
+SSH:
+
+```bash
+vagrant ssh controlplane
+```
+
+Initialize Kubernetes:
+
+```bash
+sudo kubeadm init \
+  --apiserver-advertise-address=192.168.56.10 \
+  --pod-network-cidr=10.244.0.0/16
+```
+
+The first critical option is:
+
+```text
+--apiserver-advertise-address=192.168.56.10
+```
+
+This prevents the API server from advertising:
+
+```text
+10.0.2.15
+```
+
+The second is:
+
+```text
+--pod-network-cidr=10.244.0.0/16
+```
+
+which matches the Flannel network.
+
+---
+
+# 14. Save the Worker Join Command
+
+At the end of `kubeadm init`, Kubernetes generates something similar to:
+
+```bash
+kubeadm join 192.168.56.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:xxxxxxxxxxxxxxxx
+```
+
+Save this command.
+
+If you lose it:
+
+```bash
+kubeadm token create --print-join-command
+```
+
+---
+
+# 15. Configure kubectl
 
 On the control plane:
 
-sudo kubeadm init \
---apiserver-advertise-address=192.168.56.10 \
---pod-network-cidr=10.244.0.0/16
-Step 6 – Configure kubectl
+```bash
 mkdir -p $HOME/.kube
+```
+
+Copy:
+
+```bash
+sudo cp /etc/kubernetes/admin.conf \
+  $HOME/.kube/config
+```
+
+Set ownership:
+
+```bash
+sudo chown \
+  $(id -u):$(id -g) \
+  $HOME/.kube/config
+```
+
+Verify:
+
+```bash
+kubectl get nodes
+```
+
+The control plane may currently show:
+
+```text
+NotReady
+```
+
+That is expected because Flannel has not yet been installed.
+
+---
+
+# 16. Verify the API Server Address
+
+Run:
+
+```bash
+kubectl cluster-info
+```
+
+The API server should use:
+
+```text
+https://192.168.56.10:6443
+```
+
+Check directly:
+
+```bash
+grep server ~/.kube/config
+```
+
+Expected:
+
+```text
+server: https://192.168.56.10:6443
+```
+
+---
+
+# 17. Install Flannel — Including the Multi-NIC Vagrant Fix
+
+This is the other major networking fix.
+
+Our Vagrant machines have two interfaces:
+
+```text
+eth0 = 10.0.2.x
+eth1 = 192.168.56.x
+```
+
+If Flannel automatically chooses the NAT interface, Kubernetes pod networking can fail.
+
+Therefore we explicitly configure Flannel to use:
+
+```text
+eth1
+```
+
+First download the standard Flannel manifest:
+
+```bash
+curl -L \
+  https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml \
+  -o kube-flannel.yml
+```
+
+Verify that the file exists:
+
+```bash
+ls -l kube-flannel.yml
+```
+
+Now locate the Flannel daemon arguments:
+
+```bash
+grep -n "kube-flannel" kube-flannel.yml
+```
+
+and:
+
+```bash
+grep -n "\-\-ip-masq" kube-flannel.yml
+```
+
+The Flannel container arguments normally contain something similar to:
+
+```yaml
+args:
+  - --ip-masq
+  - --kube-subnet-mgr
+```
+
+We want:
+
+```yaml
+args:
+  - --ip-masq
+  - --kube-subnet-mgr
+  - --iface=eth1
+```
+
+Add the interface automatically:
+
+```bash
+sed -i.bak \
+  '/- --kube-subnet-mgr/a\
+        - --iface=eth1' \
+  kube-flannel.yml
+```
+
+Verify the change:
+
+```bash
+grep -A5 \
+  "\-\-kube-subnet-mgr" \
+  kube-flannel.yml
+```
+
+You should see:
+
+```text
+- --kube-subnet-mgr
+- --iface=eth1
+```
+
+Now apply Flannel:
+
+```bash
+kubectl apply -f kube-flannel.yml
+```
+
+Watch startup:
+
+```bash
+kubectl get pods \
+  -n kube-flannel \
+  -o wide \
+  -w
+```
+
+Once they are running, press:
+
+```text
+Ctrl+C
+```
+
+Verify:
+
+```bash
+kubectl get pods \
+  -n kube-flannel \
+  -o wide
+```
+
+There should currently be one Flannel pod on the control plane.
+
+After workers join, there should be one on every Kubernetes node.
+
+---
+
+# 18. Verify the Flannel Configuration
+
+Run:
+
+```bash
+kubectl get daemonset \
+  -n kube-flannel \
+  kube-flannel-ds \
+  -o yaml | grep -A10 args:
+```
+
+Verify:
+
+```text
+--iface=eth1
+```
+
+Also verify the Flannel network configuration:
+
+```bash
+kubectl get configmap \
+  -n kube-flannel \
+  kube-flannel-cfg \
+  -o yaml
+```
+
+The network should include:
+
+```text
+10.244.0.0/16
+```
+
+This corresponds to the kubeadm initialization option:
+
+```text
+--pod-network-cidr=10.244.0.0/16
+```
+
+---
+
+# 19. Join Worker Node01
+
+From your Mac:
+
+```bash
+vagrant ssh node01
+```
+
+Run the join command using `sudo`.
+
+Example:
+
+```bash
+sudo kubeadm join 192.168.56.10:6443 \
+  --token YOUR_TOKEN \
+  --discovery-token-ca-cert-hash sha256:YOUR_HASH
+```
+
+---
+
+# 20. Join Worker Node02
+
+From your Mac:
+
+```bash
+vagrant ssh node02
+```
+
+Run:
+
+```bash
+sudo kubeadm join 192.168.56.10:6443 \
+  --token YOUR_TOKEN \
+  --discovery-token-ca-cert-hash sha256:YOUR_HASH
+```
+
+---
+
+# 21. Validate the Cluster
+
+Return to the control plane:
+
+```bash
+vagrant ssh controlplane
+```
+
+Run:
+
+```bash
+kubectl get nodes -o wide
+```
+
+Expected:
+
+```text
+NAME           STATUS   ROLES           INTERNAL-IP
+controlplane   Ready    control-plane   192.168.56.10
+node01         Ready    <none>          192.168.56.11
+node02         Ready    <none>          192.168.56.12
+```
+
+These addresses are important.
+
+You do **not** want:
+
+```text
+10.0.2.x
+```
+
+as the Kubernetes Internal IP.
+
+---
+
+# 22. Validate Flannel on All Three Nodes
+
+Run:
+
+```bash
+kubectl get pods \
+  -n kube-flannel \
+  -o wide
+```
+
+You should see a Flannel pod on:
+
+```text
+controlplane
+node01
+node02
+```
+
+All should show:
+
+```text
+Running
+```
+
+You can also verify the interface being used:
+
+```bash
+kubectl logs \
+  -n kube-flannel \
+  -l app=flannel \
+  --tail=100 | grep -i interface
+```
+
+You want Flannel using the:
+
+```text
+192.168.56.x
+```
+
+network.
+
+---
+
+# 23. Verify Pod CIDRs
+
+Run:
+
+```bash
+kubectl get nodes \
+  -o custom-columns=NAME:.metadata.name,PODCIDR:.spec.podCIDR
+```
+
+You should see different `/24` networks from:
+
+```text
+10.244.0.0/16
+```
+
+For example:
+
+```text
+controlplane   10.244.0.0/24
+node01         10.244.1.0/24
+node02         10.244.2.0/24
+```
+
+The exact node subnet assignments can vary.
+
+---
+
+# 24. Create the NGINX Namespace
+
+Run:
+
+```bash
+kubectl create namespace nginx-demo
+```
+
+Verify:
+
+```bash
+kubectl get namespace nginx-demo
+```
+
+---
+
+# 25. Create the Kubernetes User Private Key
+
+On the control plane:
+
+```bash
+openssl genrsa \
+  -out nginx-user.key \
+  2048
+```
+
+Verify:
+
+```bash
+ls -l nginx-user.key
+```
+
+---
+
+# 26. Generate the User CSR
+
+Run:
+
+```bash
+openssl req \
+  -new \
+  -key nginx-user.key \
+  -out nginx-user.csr \
+  -subj "/CN=nginx-user/O=developers"
+```
+
+Verify:
+
+```bash
+openssl req \
+  -in nginx-user.csr \
+  -noout \
+  -subject
+```
+
+Expected:
+
+```text
+CN = nginx-user, O = developers
+```
+
+---
+
+# 27. Create `nginx-user-csr.yaml`
+
+Now create the Kubernetes CSR manifest.
+
+Run:
+
+```bash
+cat <<EOF > manifests/nginx-user-csr.yaml
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: nginx-user
+spec:
+  request: $(cat nginx-user.csr | base64 | tr -d '\n')
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 31536000
+  usages:
+    - client auth
+EOF
+```
+
+Inspect it:
+
+```bash
+cat manifests/nginx-user-csr.yaml
+```
+
+Apply:
+
+```bash
+kubectl apply \
+  -f manifests/nginx-user-csr.yaml
+```
+
+Check:
+
+```bash
+kubectl get csr
+```
+
+Initially:
+
+```text
+Pending
+```
+
+---
+
+# 28. Approve the CSR
+
+Approve:
+
+```bash
+kubectl certificate approve nginx-user
+```
+
+Verify:
+
+```bash
+kubectl get csr nginx-user
+```
+
+Expected:
+
+```text
+Approved,Issued
+```
+
+---
+
+# 29. Extract the Kubernetes User Certificate
+
+Run:
+
+```bash
+kubectl get csr nginx-user \
+  -o jsonpath='{.status.certificate}' \
+  | base64 -d \
+  > nginx-user.crt
+```
+
+Verify:
+
+```bash
+openssl x509 \
+  -in nginx-user.crt \
+  -noout \
+  -subject \
+  -issuer
+```
+
+---
+
+# 30. Create `nginx-rbac.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/nginx-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nginx-developer
+  namespace: nginx-demo
+rules:
+
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  - apiGroups:
+      - cert-manager.io
+    resources:
+      - certificates
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nginx-developer-binding
+  namespace: nginx-demo
+
+subjects:
+  - kind: User
+    name: nginx-user
+    apiGroup: rbac.authorization.k8s.io
+
+roleRef:
+  kind: Role
+  name: nginx-developer
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/nginx-rbac.yaml
+```
+
+Apply:
+
+```bash
+kubectl apply \
+  -f manifests/nginx-rbac.yaml
+```
+
+---
+
+# 31. Test RBAC
+
+Test an allowed operation:
+
+```bash
+kubectl auth can-i create deployments \
+  --as=nginx-user \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+yes
+```
+
+Test another:
+
+```bash
+kubectl auth can-i create services \
+  --as=nginx-user \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+yes
+```
+
+Test a cluster-level operation:
+
+```bash
+kubectl auth can-i create namespaces \
+  --as=nginx-user
+```
+
+Expected:
+
+```text
+no
+```
+
+Test another namespace:
+
+```bash
+kubectl auth can-i get secrets \
+  --as=nginx-user \
+  -n kube-system
+```
+
+Expected:
+
+```text
+no
+```
+
+This demonstrates namespace-scoped least privilege.
+
+---
+
+# 32. Create the nginx-user kubeconfig
+
+Create cluster configuration:
+
+```bash
+kubectl config set-cluster kubernetes \
+  --server=https://192.168.56.10:6443 \
+  --certificate-authority=/etc/kubernetes/pki/ca.crt \
+  --embed-certs=true \
+  --kubeconfig=nginx-user.conf
+```
+
+Add credentials:
+
+```bash
+kubectl config set-credentials nginx-user \
+  --client-certificate=nginx-user.crt \
+  --client-key=nginx-user.key \
+  --embed-certs=true \
+  --kubeconfig=nginx-user.conf
+```
+
+Create context:
+
+```bash
+kubectl config set-context nginx-user \
+  --cluster=kubernetes \
+  --user=nginx-user \
+  --namespace=nginx-demo \
+  --kubeconfig=nginx-user.conf
+```
+
+Activate context:
+
+```bash
+kubectl config use-context nginx-user \
+  --kubeconfig=nginx-user.conf
+```
+
+Verify:
+
+```bash
+kubectl config view \
+  --kubeconfig=nginx-user.conf
+```
+
+---
+
+# 33. Test the Certificate-Based User
+
+Run:
+
+```bash
+kubectl get pods \
+  --kubeconfig=nginx-user.conf
+```
+
+It may return:
+
+```text
+No resources found
+```
+
+That is okay.
+
+Now test unauthorized access:
+
+```bash
+kubectl get pods \
+  -n kube-system \
+  --kubeconfig=nginx-user.conf
+```
+
+Expected:
+
+```text
+Error from server (Forbidden)
+```
+
+This proves that:
+
+```text
+authentication works
+```
+
+but:
+
+```text
+authorization is restricted
+```
+
+---
+
+# 34. Install Ingress NGINX
+
+Use the administrator credentials:
+
+```bash
+kubectl apply \
+  -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+```
+
+Monitor:
+
+```bash
+kubectl get pods \
+  -n ingress-nginx \
+  -w
+```
+
+Wait for the controller to become:
+
+```text
+Running
+```
+
+Press:
+
+```text
+Ctrl+C
+```
+
+Then:
+
+```bash
+kubectl get all \
+  -n ingress-nginx
+```
+
+---
+
+# 35. Verify Ingress NodePorts
+
+Run:
+
+```bash
+kubectl get svc \
+  -n ingress-nginx \
+  ingress-nginx-controller
+```
+
+You should see something similar to:
+
+```text
+80:32xxx/TCP
+443:32yyy/TCP
+```
+
+Get the HTTP NodePort:
+
+```bash
+kubectl get svc \
+  -n ingress-nginx \
+  ingress-nginx-controller \
+  -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}'
+```
+
+Add a newline:
+
+```bash
+echo
+```
+
+Get HTTPS:
+
+```bash
+kubectl get svc \
+  -n ingress-nginx \
+  ingress-nginx-controller \
+  -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}'
+```
+
+Then:
+
+```bash
+echo
+```
+
+Save these two values.
+
+---
+
+# 36. Install cert-manager
+
+Use administrator credentials:
+
+```bash
+kubectl apply \
+  -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+```
+
+Watch:
+
+```bash
+kubectl get pods \
+  -n cert-manager \
+  -w
+```
+
+You want:
+
+```text
+cert-manager
+cert-manager-cainjector
+cert-manager-webhook
+```
+
+all:
+
+```text
+Running
+```
+
+Press:
+
+```text
+Ctrl+C
+```
+
+Verify:
+
+```bash
+kubectl get pods \
+  -n cert-manager
+```
+
+Verify CRDs:
+
+```bash
+kubectl get crd | grep cert-manager
+```
+
+---
+
+# 37. Create `cluster-issuer.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/cluster-issuer.yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-cluster-issuer
+spec:
+  selfSigned: {}
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/cluster-issuer.yaml
+```
+
+Apply using administrator credentials:
+
+```bash
+kubectl apply \
+  -f manifests/cluster-issuer.yaml
+```
+
+Verify:
+
+```bash
+kubectl get clusterissuer
+```
+
+You want:
+
+```text
+READY
+True
+```
+
+Detailed check:
+
+```bash
+kubectl describe clusterissuer \
+  selfsigned-cluster-issuer
+```
+
+---
+
+# 38. Create `nginx-deployment.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/nginx-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: nginx-demo
+  labels:
+    app: nginx
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: nginx
+
+  template:
+    metadata:
+      labels:
+        app: nginx
+
+    spec:
+      containers:
+
+        - name: nginx
+          image: nginx:stable
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 80
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/nginx-deployment.yaml
+```
+
+Deploy using the restricted Kubernetes user:
+
+```bash
+kubectl apply \
+  --kubeconfig=nginx-user.conf \
+  -f manifests/nginx-deployment.yaml
+```
+
+---
+
+# 39. Create `nginx-service.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/nginx-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: nginx-demo
+
+spec:
+  selector:
+    app: nginx
+
+  ports:
+
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+
+  type: ClusterIP
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/nginx-service.yaml
+```
+
+Apply:
+
+```bash
+kubectl apply \
+  --kubeconfig=nginx-user.conf \
+  -f manifests/nginx-service.yaml
+```
+
+---
+
+# 40. Validate NGINX Before Ingress
+
+Check:
+
+```bash
+kubectl get pods \
+  -n nginx-demo \
+  -o wide
+```
+
+You should see two NGINX pods.
+
+Ideally, they will be scheduled between:
+
+```text
+node01
+node02
+```
+
+Check deployment:
+
+```bash
+kubectl get deployment \
+  nginx \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+READY   UP-TO-DATE   AVAILABLE
+2/2     2            2
+```
+
+Check Service:
+
+```bash
+kubectl get svc \
+  -n nginx-demo
+```
+
+---
+
+# 41. Verify Service Endpoints
+
+This is an important troubleshooting test.
+
+Run:
+
+```bash
+kubectl get endpoints \
+  nginx \
+  -n nginx-demo
+```
+
+You should see pod addresses similar to:
+
+```text
+10.244.1.x:80
+10.244.2.x:80
+```
+
+This proves:
+
+```text
+Service selector
+      ↓
+NGINX Pods
+```
+
+is functioning.
+
+---
+
+# 42. Test Cross-Node Flannel Networking
+
+First see where the NGINX pods are running:
+
+```bash
+kubectl get pods \
+  -n nginx-demo \
+  -o wide
+```
+
+You should see pod IPs from the Flannel network:
+
+```text
+10.244.x.x
+```
+
+Create a temporary curl pod:
+
+```bash
+kubectl run curl-test \
+  --image=curlimages/curl \
+  --restart=Never \
+  -n nginx-demo \
+  --command -- \
+  curl -s http://nginx
+```
+
+Check its output:
+
+```bash
+kubectl logs curl-test \
+  -n nginx-demo
+```
+
+You should receive the NGINX welcome page.
+
+Delete the test pod:
+
+```bash
+kubectl delete pod curl-test \
+  -n nginx-demo
+```
+
+This verifies:
+
+```text
+Pod
+ ↓
+Flannel
+ ↓
+Service
+ ↓
+NGINX Pod
+```
+
+and is one of the best ways to confirm your CNI is working.
+
+---
+
+# 43. Create `nginx-certificate.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/nginx-certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nginx-tls
+  namespace: nginx-demo
+
+spec:
+  secretName: nginx-tls
+
+  duration: 2160h
+  renewBefore: 360h
+
+  dnsNames:
+    - nginx.demo.local
+
+  issuerRef:
+    name: selfsigned-cluster-issuer
+    kind: ClusterIssuer
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/nginx-certificate.yaml
+```
+
+Apply with nginx-user:
+
+```bash
+kubectl apply \
+  --kubeconfig=nginx-user.conf \
+  -f manifests/nginx-certificate.yaml
+```
+
+---
+
+# 44. Verify the Certificate
+
+Run:
+
+```bash
+kubectl get certificate \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+NAME        READY
+nginx-tls   True
+```
+
+Check details:
+
+```bash
+kubectl describe certificate \
+  nginx-tls \
+  -n nginx-demo
+```
+
+Check the generated TLS Secret:
+
+```bash
+kubectl get secret \
+  nginx-tls \
+  -n nginx-demo
+```
+
+Expected type:
+
+```text
+kubernetes.io/tls
+```
+
+---
+
+# 45. Create `nginx-ingress.yaml`
+
+Create:
+
+```bash
+cat <<'EOF' > manifests/nginx-ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx
+  namespace: nginx-demo
+
+spec:
+  ingressClassName: nginx
+
+  tls:
+    - hosts:
+        - nginx.demo.local
+      secretName: nginx-tls
+
+  rules:
+    - host: nginx.demo.local
+
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+
+            backend:
+              service:
+                name: nginx
+
+                port:
+                  number: 80
+EOF
+```
+
+Inspect:
+
+```bash
+cat manifests/nginx-ingress.yaml
+```
+
+Apply using the restricted user:
+
+```bash
+kubectl apply \
+  --kubeconfig=nginx-user.conf \
+  -f manifests/nginx-ingress.yaml
+```
+
+Expected:
+
+```text
+ingress.networking.k8s.io/nginx created
+```
+
+---
+
+# 46. Validate the Ingress
+
+Run:
+
+```bash
+kubectl get ingress \
+  -n nginx-demo
+```
+
+Then:
+
+```bash
+kubectl describe ingress \
+  nginx \
+  -n nginx-demo
+```
+
+You want the backend to reference:
+
+```text
+nginx:80
+```
+
+You should also see the NGINX pod endpoints.
+
+---
+
+# 47. Configure Local DNS on Your Mac
+
+Exit the VM:
+
+```bash
+exit
+```
+
+On your Mac:
+
+```bash
+sudo vi /etc/hosts
+```
+
+Add:
+
+```text
+192.168.56.10 nginx.demo.local
+```
+
+Save.
+
+Verify:
+
+```bash
+ping nginx.demo.local
+```
+
+It should resolve:
+
+```text
+192.168.56.10
+```
+
+---
+
+# 48. Determine the HTTP and HTTPS NodePorts
+
+Return to control plane:
+
+```bash
+vagrant ssh controlplane
+```
+
+Run:
+
+```bash
+kubectl get svc \
+  -n ingress-nginx \
+  ingress-nginx-controller
+```
+
+Example:
+
+```text
+80:32080/TCP
+443:32443/TCP
+```
+
+In that example:
+
+```text
+HTTP NodePort  = 32080
+HTTPS NodePort = 32443
+```
+
+Your generated values may be different.
+
+---
+
+# 49. Test HTTP
+
+From your Mac:
+
+```bash
+curl \
+  -H "Host: nginx.demo.local" \
+  http://192.168.56.10:<HTTP-NODEPORT>
+```
+
+Example:
+
+```bash
+curl \
+  -H "Host: nginx.demo.local" \
+  http://192.168.56.10:32080
+```
+
+If the Ingress controller redirects HTTP to HTTPS, you may receive:
+
+```text
+308 Permanent Redirect
+```
+
+That is okay.
+
+---
+
+# 50. Test HTTPS
+
+Because we're using a self-signed certificate:
+
+```bash
+curl -k \
+  https://nginx.demo.local:<HTTPS-NODEPORT>
+```
+
+Example:
+
+```bash
+curl -k \
+  https://nginx.demo.local:32443
+```
+
+You should receive:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+...
+```
+
+That proves the entire data path:
+
+```text
+MacBook
+   ↓
+192.168.56.x VirtualBox Network
+   ↓
+Ingress NodePort
+   ↓
+NGINX Ingress Controller
+   ↓
+Ingress Rule
+   ↓
+NGINX ClusterIP Service
+   ↓
+Flannel Pod Network
+   ↓
+NGINX Pod
+```
+
+---
+
+# 51. Browser Test
+
+From your Mac:
+
+```text
+https://nginx.demo.local:<HTTPS-NODEPORT>
+```
+
+Example:
+
+```text
+https://nginx.demo.local:32443
+```
+
+Your browser will warn you that the certificate is self-signed.
+
+That is expected for the lab.
+
+---
+
+# 52. Full Cluster Validation
+
+Before your presentation:
+
+```bash
+kubectl get nodes -o wide
+```
+
+You want:
+
+```text
+controlplane   Ready   192.168.56.10
+node01         Ready   192.168.56.11
+node02         Ready   192.168.56.12
+```
+
+Then:
+
+```bash
+kubectl get pods -A -o wide
+```
+
+Look for:
+
+```text
+Running
+```
+
+throughout the cluster.
+
+---
+
+# 53. Final Flannel Validation
+
+Run:
+
+```bash
+kubectl get pods \
+  -n kube-flannel \
+  -o wide
+```
+
+There should be one Flannel pod on every node.
+
+Verify the Flannel command:
+
+```bash
+kubectl get daemonset \
+  kube-flannel-ds \
+  -n kube-flannel \
+  -o yaml \
+  | grep -A10 args:
+```
+
+Confirm:
+
+```text
+--iface=eth1
+```
+
+Verify Pod CIDRs:
+
+```bash
+kubectl get nodes \
+  -o custom-columns=NAME:.metadata.name,INTERNAL-IP:.status.addresses[0].address,PODCIDR:.spec.podCIDR
+```
+
+The node addresses should be:
+
+```text
+192.168.56.10
+192.168.56.11
+192.168.56.12
+```
+
+while pod networks should come from:
+
+```text
+10.244.0.0/16
+```
+
+---
+
+# 54. NGINX Validation
+
+Run:
+
+```bash
+kubectl get all \
+  -n nginx-demo
+```
+
+You should have:
+
+```text
+2 NGINX pods
+1 NGINX deployment
+1 ReplicaSet
+1 ClusterIP Service
+```
+
+Then:
+
+```bash
+kubectl get pods \
+  -n nginx-demo \
+  -o wide
+```
+
+Verify the pods have:
+
+```text
+10.244.x.x
+```
+
+addresses.
+
+---
+
+# 55. Service Validation
+
+Run:
+
+```bash
+kubectl get endpoints \
+  nginx \
+  -n nginx-demo
+```
+
+You want both NGINX Pod IPs.
+
+For example:
+
+```text
+10.244.1.x:80,10.244.2.x:80
+```
+
+---
+
+# 56. Ingress Validation
+
+Run:
+
+```bash
+kubectl get ingress \
+  -n nginx-demo
+```
+
+Then:
+
+```bash
+kubectl describe ingress \
+  nginx \
+  -n nginx-demo
+```
+
+---
+
+# 57. Certificate Validation
+
+Run:
+
+```bash
+kubectl get certificate \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+READY
+True
+```
+
+Then:
+
+```bash
+kubectl get certificaterequest \
+  -n nginx-demo
+```
+
+---
+
+# 58. Kubernetes CSR Validation
+
+Run:
+
+```bash
+kubectl get csr
+```
+
+Expected:
+
+```text
+nginx-user   Approved,Issued
+```
+
+---
+
+# 59. RBAC Validation
+
+Allowed:
+
+```bash
+kubectl auth can-i create deployments \
+  --as=nginx-user \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+yes
+```
+
+Not allowed:
+
+```bash
+kubectl auth can-i create namespaces \
+  --as=nginx-user
+```
+
+Expected:
+
+```text
+no
+```
+
+---
+
+# 60. Certificate Authentication Validation
+
+Run:
+
+```bash
+kubectl get deployments \
+  --kubeconfig=nginx-user.conf
+```
+
+Expected:
+
+```text
+nginx
+```
+
+Attempt unauthorized access:
+
+```bash
+kubectl get pods \
+  -n kube-system \
+  --kubeconfig=nginx-user.conf
+```
+
+Expected:
+
+```text
+Forbidden
+```
+
+This proves both:
+
+```text
+Authentication
+```
+
+and:
+
+```text
+Authorization
+```
+
+are working correctly.
+
+---
+
+# 61. Final Presentation Command Sequence
+
+For your presentation, I would demonstrate the finished environment rather than rebuild it live.
+
+Start with:
+
+```bash
+kubectl get nodes -o wide
+```
+
+Explain:
+
+> I built a three-node Kubernetes cluster using kubeadm. Because Vagrant gives each VM both a NAT interface and a private interface, I explicitly configured kubelet to register the `192.168.56.x` addresses.
+
+Then:
+
+```bash
+kubectl get pods \
+  -n kube-flannel \
+  -o wide
+```
+
+Explain:
+
+> Flannel provides the Kubernetes pod network. Because the VMs have multiple interfaces, I explicitly configured Flannel with `--iface=eth1` to ensure overlay traffic uses the private Kubernetes network rather than Vagrant's NAT network.
+
+Then:
+
+```bash
+kubectl get pods \
+  -n nginx-demo \
+  -o wide
+```
+
+Explain the:
+
+```text
+10.244.x.x
+```
+
+Pod IP addresses.
+
+Then:
+
+```bash
+kubectl get svc \
+  -n nginx-demo
+```
+
+Then:
+
+```bash
+kubectl get endpoints \
+  nginx \
+  -n nginx-demo
+```
+
+Explain that both NGINX pod IPs appear behind the Service.
+
+Then:
+
+```bash
+kubectl get ingress \
+  -n nginx-demo
+```
+
+Then:
+
+```bash
+kubectl get certificate \
+  -n nginx-demo
+```
+
+Then:
+
+```bash
+kubectl get csr
+```
+
+Then demonstrate RBAC:
+
+```bash
+kubectl auth can-i create deployments \
+  --as=nginx-user \
+  -n nginx-demo
+```
+
+Expected:
+
+```text
+yes
+```
+
+Then:
+
+```bash
+kubectl auth can-i create namespaces \
+  --as=nginx-user
+```
+
+Expected:
+
+```text
+no
+```
+
+Finally:
+
+```bash
+curl -k \
+  https://nginx.demo.local:<HTTPS-NODEPORT>
+```
+
+You should receive the NGINX page.
+
+---
+
+# 62. Key Troubleshooting Fixes to Discuss
+
+## Fix 1 — API Server Selected Wrong Interface
+
+Initially Vagrant presented:
+
+```text
+10.0.2.15
+```
+
+as one of the control-plane interfaces.
+
+We explicitly initialized Kubernetes with:
+
+```bash
+--apiserver-advertise-address=192.168.56.10
+```
+
+This ensures workers communicate with the API server over the Kubernetes private network.
+
+---
+
+## Fix 2 — kubelet Registered the Wrong IP
+
+Because every VM has multiple interfaces, kubelet could register:
+
+```text
+10.0.2.x
+```
+
+We fixed this using:
+
+```text
+KUBELET_EXTRA_ARGS=--node-ip=192.168.56.x
+```
+
+for every machine.
+
+---
+
+## Fix 3 — Flannel Selected the Wrong Interface
+
+The nodes contain:
+
+```text
+eth0 → 10.0.2.x
+eth1 → 192.168.56.x
+```
+
+Flannel could select the NAT interface.
+
+We modified its DaemonSet arguments to include:
+
+```text
+--iface=eth1
+```
+
+This forces Flannel traffic over:
+
+```text
+192.168.56.0/24
+```
+
+---
+
+## Fix 4 — Flannel Requires the Correct Pod CIDR
+
+Flannel expects:
+
+```text
+10.244.0.0/16
+```
+
+Therefore kubeadm was initialized with:
+
+```bash
+--pod-network-cidr=10.244.0.0/16
+```
+
+---
+
+## Fix 5 — kubectl Could Not Connect
+
+If kubectl reports:
+
+```text
+couldn't get current server API group list
+```
+
+or tries:
+
+```text
+http://localhost:8080
+```
+
+configure:
+
+```bash
+mkdir -p ~/.kube
 
 sudo cp /etc/kubernetes/admin.conf \
-$HOME/.kube/config
+  ~/.kube/config
 
-sudo chown $(id -u):$(id -g) \
-$HOME/.kube/config
+sudo chown \
+  $(id -u):$(id -g) \
+  ~/.kube/config
+```
 
-Verify:
+---
 
-kubectl get nodes
-Step 7 – Install Flannel
-kubectl apply -f \
-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-Step 8 – Fix Flannel for Vagrant (Important)
+## Fix 6 — Kubernetes CSR Pending
 
-By default, Flannel selected the VirtualBox NAT interface (eth0, 10.0.2.15) instead of the Vagrant private interface (eth1, 192.168.56.x), preventing inter-node pod networking and causing the ingress admission webhook to time out.
+After creating the CSR:
 
-Verify the interfaces:
+```bash
+kubectl get csr
+```
 
-ip -br address
+may show:
 
-Expected:
+```text
+Pending
+```
 
-eth0 10.0.2.15
-eth1 192.168.56.x
+Approve it:
 
-Patch Flannel to use eth1:
-
-kubectl -n kube-flannel patch daemonset kube-flannel-ds \
---type='json' \
--p='[
-{
-"op":"add",
-"path":"/spec/template/spec/containers/0/args/-",
-"value":"--iface=eth1"
-}
-]'
-
-Restart Flannel:
-
-kubectl rollout restart daemonset/kube-flannel-ds \
--n kube-flannel
-
-Wait:
-
-kubectl rollout status daemonset/kube-flannel-ds \
--n kube-flannel
-
-Verify:
-
-kubectl get nodes \
--o custom-columns='NODE:.metadata.name,FLANNEL-PUBLIC-IP:.metadata.annotations.flannel\.alpha\.coreos\.com/public-ip'
-
-Expected:
-
-controlplane 192.168.56.10
-node01       192.168.56.11
-node02       192.168.56.12
-Step 9 – Join Worker Nodes
-
-Generate the join command:
-
-kubeadm token create --print-join-command
-
-Run it on node01 and node02.
-
-Verify:
-
-kubectl get nodes -o wide
-Step 10 – Install ingress-nginx
-
-Use the bare-metal manifest:
-
-kubectl apply -f \
-https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
-
-Wait:
-
-kubectl rollout status deployment/ingress-nginx-controller \
--n ingress-nginx
-Step 11 – Install Cert-Manager
-kubectl apply -f \
-https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-
-Verify:
-
-kubectl get pods -n cert-manager
-Step 12 – Create the Namespace
-kubectl create namespace web
-Step 13 – Configure RBAC
-Generate a client key:
-openssl genrsa -out nginx-user.key 2048
-Create a CSR:
-openssl req -new \
--key nginx-user.key \
--out nginx-user.csr \
--subj "/CN=nginx-user/O=developers"
-Base64-encode the CSR and create a CertificateSigningRequest manifest.
-Apply and approve it:
-kubectl apply -f nginx-user-csr.yaml
+```bash
 kubectl certificate approve nginx-user
-Retrieve the signed certificate:
-kubectl get csr nginx-user \
--o jsonpath='{.status.certificate}' \
-| base64 -d > nginx-user.crt
-Create a Role in the web namespace allowing management of Deployments, Services, Pods, ConfigMaps, Secrets, and Ingresses.
-Create a RoleBinding that binds the nginx-user to that Role.
-Build the nginx-user.conf kubeconfig using kubectl config set-cluster, set-credentials, and set-context.
-Verify permissions:
-kubectl auth can-i create deployment \
---namespace web \
---kubeconfig=nginx-user.conf
+```
 
-Expected:
+It should become:
 
-yes
-Step 14 – Deploy NGINX as the RBAC User
+```text
+Approved,Issued
+```
 
-Use the limited user's kubeconfig:
+---
 
-export KUBECONFIG=nginx-user.conf
+## Fix 7 — Certificate Pending
 
-Deploy:
-
-kubectl apply -f nginx-deployment.yaml
-kubectl apply -f nginx-service.yaml
-kubectl apply -f nginx-ingress.yaml
+cert-manager must be installed and operational before creating the Certificate resource.
 
 Verify:
 
-kubectl get all -n web
-kubectl get ingress -n web
-Step 15 – Validate Access
+```bash
+kubectl get pods \
+  -n cert-manager
+```
 
-Determine the NodePort assigned to the ingress controller:
+Then verify the issuer:
 
-kubectl get svc ingress-nginx-controller -n ingress-nginx
+```bash
+kubectl get clusterissuer
+```
 
-Test with the appropriate NodePort:
+The issuer must show:
 
-curl -H "Host: nginx.local" \
-http://192.168.56.10:<HTTP_NODEPORT>
-Final Verification
-kubectl get nodes shows all three nodes in the Ready state.
-kubectl get pods -A shows all system pods healthy.
-kubectl auth can-i confirms the nginx-user can deploy only within the web namespace.
-NGINX is reachable through the ingress controller.
-Flannel advertises the 192.168.56.x addresses, ensuring reliable inter-node pod networking.
-The deployment satisfies the take-home requirements for a kubeadm-based cluster, RBAC using certificate authentication, and deployment of NGINX by a non-admin user.
+```text
+READY=True
+```
+
+before relying on it.
+
+---
+
+## Fix 8 — Ingress Admission Webhook Errors
+
+Before applying your Ingress, verify:
+
+```bash
+kubectl get pods \
+  -n ingress-nginx
+```
+
+The Ingress controller/admission components must be operational.
+
+Only then apply:
+
+```bash
+kubectl apply \
+  --kubeconfig=nginx-user.conf \
+  -f manifests/nginx-ingress.yaml
+```
+
+---
+
+# 63. Final Architecture
+
+```text
+                        MacBook
+                           |
+                           |
+                VirtualBox Host Network
+                   192.168.56.0/24
+                           |
+            +--------------+--------------+
+            |              |              |
+            v              v              v
+
+      controlplane       node01         node02
+      192.168.56.10   192.168.56.11  192.168.56.12
+            |              |              |
+            +--------------+--------------+
+                           |
+                       Kubernetes
+                           |
+                 Flannel --iface=eth1
+                           |
+                     10.244.0.0/16
+                           |
+                 +---------+---------+
+                 |                   |
+             nginx Pod           nginx Pod
+             10.244.x.x           10.244.x.x
+                 |                   |
+                 +---------+---------+
+                           |
+                     ClusterIP Service
+                           |
+                         Ingress
+                           |
+                    ingress-nginx
+                           |
+                    HTTP / HTTPS
+                       NodePort
+                           |
+                   nginx.demo.local
+```
+
+The authentication flow is:
+
+```text
+nginx-user.key
+      |
+      v
+nginx-user.csr
+      |
+      v
+CertificateSigningRequest
+      |
+      | kubectl certificate approve
+      v
+nginx-user.crt
+      |
+      v
+nginx-user.conf
+      |
+      v
+Kubernetes API
+      |
+      v
+RoleBinding
+      |
+      v
+nginx-developer Role
+      |
+      v
+nginx-demo namespace
+```
+
+TLS is:
+
+```text
+selfsigned-cluster-issuer
+          |
+          v
+      cert-manager
+          |
+          v
+      Certificate
+       nginx-tls
+          |
+          v
+ Kubernetes TLS Secret
+          |
+          v
+        Ingress
+          |
+          v
+         HTTPS
+```
+
