@@ -1,0 +1,237 @@
+Kubernetes Cluster Validation
+Teleport Professional Services Take-Home
+
+Date: Fri Aug  7 07:41:17 PM UTC 2026
+Host: controlplane
+Application Namespace: nginx-demo
+
+============================================================
+1. Kubernetes API
+============================================================
+[PASS] Kubernetes API server is reachable.
+
+============================================================
+2. Kubernetes Nodes
+============================================================
+[PASS] Expected 3 Kubernetes nodes found.
+
+NAME           STATUS   ROLES           AGE     VERSION    INTERNAL-IP     EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
+controlplane   Ready    control-plane   3h21m   v1.33.13   192.168.56.10   <none>        Ubuntu 24.04.3 LTS   6.8.0-86-generic   containerd://2.2.1
+node01         Ready    <none>          3h11m   v1.33.13   192.168.56.11   <none>        Ubuntu 24.04.3 LTS   6.8.0-86-generic   containerd://2.2.1
+node02         Ready    <none>          3h11m   v1.33.13   192.168.56.12   <none>        Ubuntu 24.04.3 LTS   6.8.0-86-generic   containerd://2.2.1
+
+--- Node Ready Status ---
+[PASS] controlplane is Ready.
+[PASS] node01 is Ready.
+[PASS] node02 is Ready.
+
+============================================================
+3. Node IP Configuration
+============================================================
+[PASS] controlplane InternalIP = 192.168.56.10
+[PASS] node01 InternalIP = 192.168.56.11
+[PASS] node02 InternalIP = 192.168.56.12
+
+============================================================
+4. Kubernetes System Pods
+============================================================
+[PASS] All kube-system pods are healthy.
+
+NAME                                   READY   STATUS    RESTARTS   AGE     IP              NODE           NOMINATED NODE   READINESS GATES
+coredns-674b8bbfcf-ljkwp               1/1     Running   0          3h20m   10.244.0.3      controlplane   <none>           <none>
+coredns-674b8bbfcf-r4qtp               1/1     Running   0          3h20m   10.244.0.2      controlplane   <none>           <none>
+etcd-controlplane                      1/1     Running   0          3h21m   192.168.56.10   controlplane   <none>           <none>
+kube-apiserver-controlplane            1/1     Running   0          3h21m   192.168.56.10   controlplane   <none>           <none>
+kube-controller-manager-controlplane   1/1     Running   0          3h21m   192.168.56.10   controlplane   <none>           <none>
+kube-proxy-2mvp4                       1/1     Running   0          3h11m   192.168.56.12   node02         <none>           <none>
+kube-proxy-5v2w4                       1/1     Running   0          3h20m   192.168.56.10   controlplane   <none>           <none>
+kube-proxy-gfztf                       1/1     Running   0          3h11m   192.168.56.11   node01         <none>           <none>
+kube-scheduler-controlplane            1/1     Running   0          3h21m   192.168.56.10   controlplane   <none>           <none>
+
+============================================================
+5. Flannel CNI
+============================================================
+[PASS] Flannel is running on all 3 nodes.
+
+NAME                    READY   STATUS    RESTARTS   AGE     IP              NODE           NOMINATED NODE   READINESS GATES
+kube-flannel-ds-7h7mf   1/1     Running   0          3h15m   192.168.56.10   controlplane   <none>           <none>
+kube-flannel-ds-g5xx6   1/1     Running   0          3h11m   192.168.56.12   node02         <none>           <none>
+kube-flannel-ds-tm96w   1/1     Running   0          3h11m   192.168.56.11   node01         <none>           <none>
+
+--- Flannel Public IPs ---
+NODE           FLANNEL-PUBLIC-IP
+controlplane   192.168.56.10
+node01         192.168.56.11
+node02         192.168.56.12
+
+[PASS] Flannel controlplane = 192.168.56.10
+[PASS] Flannel node01 = 192.168.56.11
+[PASS] Flannel node02 = 192.168.56.12
+
+--- Flannel Interface ---
+[PASS] Flannel is configured to use Vagrant private interface eth1.
+
+============================================================
+6. CoreDNS
+============================================================
+[PASS] CoreDNS is healthy (2/2 replicas).
+
+============================================================
+7. ingress-nginx
+============================================================
+[PASS] ingress-nginx controller is running.
+
+NAME                                       READY   STATUS    RESTARTS   AGE    IP           NODE     NOMINATED NODE   READINESS GATES
+ingress-nginx-controller-5df99f46b-skfws   1/1     Running   0          175m   10.244.1.3   node01   <none>           <none>
+
+--- Ingress Admission Webhook ---
+[PASS] Ingress admission endpoint exists: 10.244.1.3:8443
+[PASS] Control plane can reach ingress admission webhook.
+
+============================================================
+8. cert-manager
+============================================================
+[PASS] All cert-manager pods are running.
+
+NAME                                       READY   STATUS    RESTARTS   AGE    IP           NODE     NOMINATED NODE   READINESS GATES
+cert-manager-78dd6867b4-bs4b4              1/1     Running   0          170m   10.244.2.3   node02   <none>           <none>
+cert-manager-cainjector-676d6dbb9c-rbvrg   1/1     Running   0          170m   10.244.1.4   node01   <none>           <none>
+cert-manager-webhook-5fcb945f68-vcvhf      1/1     Running   0          170m   10.244.2.4   node02   <none>           <none>
+
+============================================================
+9. Application Namespace
+============================================================
+[PASS] Namespace 'nginx-demo' exists.
+
+============================================================
+10. NGINX Deployment
+============================================================
+[PASS] NGINX deployment exists.
+[PASS] NGINX deployment replicas are healthy (2/2).
+
+NAME                     READY   STATUS    RESTARTS   AGE    IP           NODE     NOMINATED NODE   READINESS GATES
+nginx-7fd8674dfb-kkj7s   1/1     Running   0          165m   10.244.2.5   node02   <none>           <none>
+nginx-7fd8674dfb-shhgk   1/1     Running   0          165m   10.244.1.5   node01   <none>           <none>
+
+============================================================
+11. NGINX Service
+============================================================
+[PASS] NGINX service exists (ClusterIP: 10.109.38.52).
+[PASS] NGINX service has backend endpoint(s): 10.244.1.5 10.244.2.5
+
+============================================================
+12. NGINX Ingress
+============================================================
+[PASS] NGINX ingress exists.
+[INFO] Ingress hostname: nginx.demo.local
+
+NAME    CLASS   HOSTS              ADDRESS         PORTS     AGE
+nginx   nginx   nginx.demo.local   192.168.56.11   80, 443   158m
+
+============================================================
+13. RBAC Validation
+============================================================
+[PASS] RBAC user kubeconfig found: /home/vagrant/nginx-user.conf
+
+--- RBAC Identity ---
+[PASS] Certificate authenticates as nginx-user.
+
+--- Allowed Permissions ---
+[PASS] nginx-user CAN create deployments in 'nginx-demo'.
+[PASS] nginx-user CAN create services in 'nginx-demo'.
+[PASS] nginx-user CAN create ingresses in 'nginx-demo'.
+
+--- Denied Permissions / Least Privilege ---
+[PASS] nginx-user correctly CANNOT create deployments in default namespace.
+[PASS] nginx-user correctly CANNOT access kube-system pods.
+[PASS] nginx-user correctly CANNOT access cluster-level Node resources.
+
+============================================================
+14. Application Connectivity
+============================================================
+[PASS] Ingress HTTP NodePort detected: 31303
+[INFO] Testing http://192.168.56.10:31303 with Host header nginx.local
+[WARN] NGINX ingress HTTP test returned status 404.
+[INFO] If the ingress controller is scheduled on a worker node, try:
+[INFO] curl -H 'Host: nginx.local' http://192.168.56.11:31303
+[INFO] curl -H 'Host: nginx.local' http://192.168.56.12:31303
+
+============================================================
+15. Certificate Resources
+============================================================
+
+NAME        READY   SECRET      AGE
+nginx-tls   True    nginx-tls   160m
+[PASS] All Certificate resources report Ready.
+
+============================================================
+16. User Certificate Signing Request
+============================================================
+[WARN] CSR named 'nginx-user' was not found.
+
+============================================================
+17. RBAC Resources
+============================================================
+[PASS] Found RoleBinding: nginx-developer-binding
+[PASS] RoleBinding references Role/nginx-developer.
+[PASS] RoleBinding correctly grants access to nginx-user.
+[PASS] Referenced Role 'nginx-developer' exists in 'nginx-demo'.
+
+============================================================
+18. ClusterRoleBinding Safety Check
+============================================================
+[PASS] nginx-user has no direct ClusterRoleBinding.
+
+============================================================
+19. Final Resource Overview
+============================================================
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE    CONTAINERS   IMAGES         SELECTOR
+deployment.apps/nginx   2/2     2            2           165m   nginx        nginx:stable   app=nginx
+
+NAME                         READY   STATUS    RESTARTS   AGE    IP           NODE     NOMINATED NODE   READINESS GATES
+pod/nginx-7fd8674dfb-kkj7s   1/1     Running   0          165m   10.244.2.5   node02   <none>           <none>
+pod/nginx-7fd8674dfb-shhgk   1/1     Running   0          165m   10.244.1.5   node01   <none>           <none>
+
+NAME            TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE    SELECTOR
+service/nginx   ClusterIP   10.109.38.52   <none>        80/TCP    164m   app=nginx
+
+NAME                              CLASS   HOSTS              ADDRESS         PORTS     AGE
+ingress.networking.k8s.io/nginx   nginx   nginx.demo.local   192.168.56.11   80, 443   158m
+
+============================================================
+VALIDATION SUMMARY
+============================================================
+Total Checks:        42
+Passed:              40
+Warnings:            2
+Failed:              0
+
+============================================================
+ CLUSTER VALIDATION SUCCESSFUL
+============================================================
+
+The Kubernetes cluster appears operational.
+
+Validated:
+  - Kubernetes API
+  - Control plane and worker nodes
+  - Correct 192.168.56.x node networking
+  - Flannel CNI
+  - Flannel eth1 interface selection
+  - CoreDNS
+  - ingress-nginx
+  - Ingress admission webhook
+  - cert-manager
+  - nginx-demo namespace
+  - NGINX Deployment
+  - NGINX Service
+  - NGINX Ingress
+  - Certificate-based nginx-user authentication
+  - Namespace-scoped RBAC permissions
+  - Least-privilege access restrictions
+  - RoleBinding and Role relationship
+  - No direct cluster-wide RBAC grant
+
+Validation completed with 2 warning(s).
+Review warnings above to determine whether action is required.
+
